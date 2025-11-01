@@ -88,7 +88,11 @@ class AlertActivity : ComponentActivity() {
         }
         
         // Register receiver for scan completion
-        registerReceiver(scanCompleteReceiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        try {
+            registerReceiver(scanCompleteReceiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        } catch (e: Exception) {
+            android.util.Log.e("AlertActivity", "Error registering receiver", e)
+        }
         
         // Set auto-dismiss after minimum time if scan completes
         handler.postDelayed({
@@ -116,9 +120,13 @@ class AlertActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            unregisterReceiver(scanCompleteReceiver)
+            if (scanCompleteReceiver != null) {
+                unregisterReceiver(scanCompleteReceiver)
+            }
+        } catch (e: IllegalArgumentException) {
+            // Receiver was not registered, ignore
         } catch (e: Exception) {
-            // Receiver might not be registered
+            android.util.Log.e("AlertActivity", "Error unregistering receiver", e)
         }
     }
 }

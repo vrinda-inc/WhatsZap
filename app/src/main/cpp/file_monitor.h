@@ -19,7 +19,7 @@ public:
     bool isMonitoring() const { return monitoring_; }
 
 private:
-    void monitorThread(const std::string& directory, JNIEnv* env, jobject callback);
+    void monitorThread(std::string directory, JavaVM* jvm, jobject callback);
     
     std::atomic<bool> monitoring_;
     std::atomic<bool> shouldStop_;

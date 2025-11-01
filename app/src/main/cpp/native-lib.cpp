@@ -43,13 +43,36 @@ Java_com_example_whatszap_FileMonitorService_nativeStartMonitoring(
         return JNI_FALSE;
     }
     
-    FileMonitor* monitor = reinterpret_cast<FileMonitor*>(nativeHandle);
-    const char* dirStr = env->GetStringUTFChars(directory, nullptr);
-    std::string dir(dirStr);
-    env->ReleaseStringUTFChars(directory, dirStr);
+    if (directory == nullptr || callback == nullptr) {
+        LOGE("Invalid parameters: directory or callback is null");
+        return JNI_FALSE;
+    }
     
-    bool result = monitor->startMonitoring(dir, env, callback);
-    return result ? JNI_TRUE : JNI_FALSE;
+    try {
+        FileMonitor* monitor = reinterpret_cast<FileMonitor*>(nativeHandle);
+        const char* dirStr = env->GetStringUTFChars(directory, nullptr);
+        if (dirStr == nullptr) {
+            LOGE("Failed to get directory string");
+            return JNI_FALSE;
+        }
+        
+        std::string dir(dirStr);
+        env->ReleaseStringUTFChars(directory, dirStr);
+        
+        bool result = monitor->startMonitoring(dir, env, callback);
+        
+        if (env->ExceptionCheck()) {
+            LOGE("Exception occurred in startMonitoring");
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return JNI_FALSE;
+        }
+        
+        return result ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& e) {
+        LOGE("Exception in nativeStartMonitoring: %s", e.what());
+        return JNI_FALSE;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -98,50 +121,123 @@ Java_com_example_whatszap_FileMonitorService_nativeScanApk(
         return nullptr;
     }
     
-    MalwareScanner* scanner = reinterpret_cast<MalwareScanner*>(nativeHandle);
-    const char* pathStr = env->GetStringUTFChars(apkPath, nullptr);
-    std::string path(pathStr);
-    env->ReleaseStringUTFChars(apkPath, pathStr);
-    
-    ScanResult result = scanner->scanApk(path);
-    
-    // Create Java ScanResult object
-    jclass resultClass = env->FindClass("com/example/whatszap/ScanResult");
-    if (!resultClass) {
-        LOGE("Could not find ScanResult class");
+    if (apkPath == nullptr) {
+        LOGE("Invalid apkPath parameter");
         return nullptr;
     }
     
-    jmethodID constructor = env->GetMethodID(resultClass, "<init>", "(ZILjava/util/List;J)V");
-    if (!constructor) {
-        LOGE("Could not find ScanResult constructor");
+    try {
+        MalwareScanner* scanner = reinterpret_cast<MalwareScanner*>(nativeHandle);
+        const char* pathStr = env->GetStringUTFChars(apkPath, nullptr);
+        if (pathStr == nullptr) {
+            LOGE("Failed to get apkPath string");
+            return nullptr;
+        }
+        
+        std::string path(pathStr);
+        env->ReleaseStringUTFChars(apkPath, pathStr);
+        
+        ScanResult result = scanner->scanApk(path);
+        
+        // Create Java ScanResult object
+        jclass resultClass = env->FindClass("com/example/whatszap/ScanResult");
+        if (!resultClass) {
+            LOGE("Could not find ScanResult class");
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return nullptr;
+        }
+        
+        jmethodID constructor = env->GetMethodID(resultClass, "<init>", "(ZILjava/util/List;J)V");
+        if (!constructor) {
+            LOGE("Could not find ScanResult constructor");
+            env->DeleteLocalRef(resultClass);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return nullptr;
+        }
+        
+        // Create ArrayList for threats
+        jclass arrayListClass = env->FindClass("java/util/ArrayList");
+        if (!arrayListClass) {
+            LOGE("Could not find ArrayList class");
+            env->DeleteLocalRef(resultClass);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return nullptr;
+        }
+        
+        jmethodID arrayListConstructor = env->GetMethodID(arrayListClass, "<init>", "(I)V");
+        jmethodID arrayListAdd = env->GetMethodID(arrayListClass, "add", "(Ljava/lang/Object;)Z");
+        
+        if (!arrayListConstructor || !arrayListAdd) {
+            LOGE("Could not find ArrayList methods");
+            env->DeleteLocalRef(resultClass);
+            env->DeleteLocalRef(arrayListClass);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return nullptr;
+        }
+        
+        jobject threatsList = env->NewObject(arrayListClass, arrayListConstructor, result.threats.size());
+        if (!threatsList) {
+            LOGE("Failed to create ArrayList");
+            env->DeleteLocalRef(resultClass);
+            env->DeleteLocalRef(arrayListClass);
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+            }
+            return nullptr;
+        }
+        
+        for (const auto& threat : result.threats) {
+            jstring threatStr = env->NewStringUTF(threat.c_str());
+            if (threatStr) {
+                env->CallBooleanMethod(threatsList, arrayListAdd, threatStr);
+                if (env->ExceptionCheck()) {
+                    LOGE("Exception adding threat to list");
+                    env->ExceptionDescribe();
+                    env->ExceptionClear();
+                }
+                env->DeleteLocalRef(threatStr);
+            }
+        }
+        
+        jobject javaResult = env->NewObject(resultClass, constructor,
+            result.isMalicious ? JNI_TRUE : JNI_FALSE,
+            result.confidence,
+            threatsList,
+            result.scanDuration);
+        
+        env->DeleteLocalRef(threatsList);
+        env->DeleteLocalRef(resultClass);
+        env->DeleteLocalRef(arrayListClass);
+        
+        if (env->ExceptionCheck()) {
+            LOGE("Exception creating ScanResult object");
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return nullptr;
+        }
+        
+        return javaResult;
+    } catch (const std::exception& e) {
+        LOGE("Exception in nativeScanApk: %s", e.what());
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
         return nullptr;
     }
-    
-    // Create ArrayList for threats
-    jclass arrayListClass = env->FindClass("java/util/ArrayList");
-    jmethodID arrayListConstructor = env->GetMethodID(arrayListClass, "<init>", "(I)V");
-    jmethodID arrayListAdd = env->GetMethodID(arrayListClass, "add", "(Ljava/lang/Object;)Z");
-    
-    jobject threatsList = env->NewObject(arrayListClass, arrayListConstructor, result.threats.size());
-    
-    for (const auto& threat : result.threats) {
-        jstring threatStr = env->NewStringUTF(threat.c_str());
-        env->CallBooleanMethod(threatsList, arrayListAdd, threatStr);
-        env->DeleteLocalRef(threatStr);
-    }
-    
-    jobject javaResult = env->NewObject(resultClass, constructor,
-        result.isMalicious ? JNI_TRUE : JNI_FALSE,
-        result.confidence,
-        threatsList,
-        result.scanDuration);
-    
-    env->DeleteLocalRef(threatsList);
-    env->DeleteLocalRef(resultClass);
-    env->DeleteLocalRef(arrayListClass);
-    
-    return javaResult;
 }
 
 extern "C" JNIEXPORT void JNICALL
