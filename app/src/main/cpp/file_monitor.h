@@ -19,7 +19,8 @@ public:
     bool isMonitoring() const { return monitoring_; }
 
 private:
-    void monitorThread(const std::string& directory, JNIEnv* env, jobject callback);
+    // Pass JavaVM* instead of JNIEnv* to the thread
+    void monitorThread(const std::string& directory, JavaVM* jvm, jobject callback);
     
     std::atomic<bool> monitoring_;
     std::atomic<bool> shouldStop_;
@@ -29,4 +30,3 @@ private:
 };
 
 #endif // WHATSZAP_FILE_MONITOR_H
-

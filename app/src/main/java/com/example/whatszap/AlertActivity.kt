@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -13,15 +14,31 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.OnBackPressedCallback
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.whatszap.ui.theme.WhatsZapTheme
@@ -83,12 +100,20 @@ class AlertActivity : ComponentActivity() {
         
         setContent {
             WhatsZapTheme {
-                AlertScreen(apkPath = apkPath)
+                AlertScreen(apkPath = apkPath, onDismiss = { finish() })
             }
         }
         
         // Register receiver for scan completion
-        registerReceiver(scanCompleteReceiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(
+                scanCompleteReceiver, 
+                IntentFilter("com.example.whatszap.SCAN_COMPLETE"),
+                RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            registerReceiver(scanCompleteReceiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        }
         
         // Set auto-dismiss after minimum time if scan completes
         handler.postDelayed({
@@ -99,17 +124,12 @@ class AlertActivity : ComponentActivity() {
     private fun checkCanDismiss() {
         val elapsed = System.currentTimeMillis() - startTime
         if (scanComplete && elapsed >= minDisplayTime) {
-            finish()
+            // Don't auto-dismiss, let user review results
         } else if (!scanComplete) {
             // Reschedule check
             handler.postDelayed({
                 checkCanDismiss()
             }, 1000)
-        } else {
-            // Scan complete but need to wait for minimum time
-            handler.postDelayed({
-                finish()
-            }, minDisplayTime - elapsed)
         }
     }
 
@@ -124,15 +144,47 @@ class AlertActivity : ComponentActivity() {
 }
 
 @Composable
-fun AlertScreen(apkPath: String) {
-    var scanStatus by remember { mutableStateOf("Scanning in progress...") }
-    var scanProgress by remember { mutableStateOf(0) }
+fun AlertScreen(apkPath: String, onDismiss: () -> Unit) {
+    var scanStatus by remember { mutableStateOf("Initializing scan...") }
+    var scanProgress by remember { mutableStateOf(0f) }
     var scanComplete by remember { mutableStateOf(false) }
     var isMalicious by remember { mutableStateOf(false) }
     var threats by remember { mutableStateOf<List<String>>(emptyList()) }
+    var confidence by remember { mutableStateOf(0) }
+    
+    // VirusTotal state
+    var vtScanned by remember { mutableStateOf(false) }
+    var vtDetections by remember { mutableStateOf(0) }
+    var vtEngines by remember { mutableStateOf(0) }
+    var vtLink by remember { mutableStateOf<String?>(null) }
+    var vtThreats by remember { mutableStateOf<List<String>>(emptyList()) }
+    var sha256Hash by remember { mutableStateOf("") }
+    
+    // Static analysis state
+    var packageName by remember { mutableStateOf<String?>(null) }
+    var appLabel by remember { mutableStateOf<String?>(null) }
+    var riskScore by remember { mutableStateOf(0) }
+    var dangerousPermissions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var suspiciousPermissions by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    // Context
+    var senderContext by remember { mutableStateOf<String?>(null) }
+    var fileSize by remember { mutableStateOf(0L) }
     
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    
+    // Animation for scanning indicator
+    val infiniteTransition = rememberInfiniteTransition(label = "scan")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
     
     // Listen for scan completion broadcast
     DisposableEffect(Unit) {
@@ -141,23 +193,66 @@ fun AlertScreen(apkPath: String) {
                 if (intent?.action == "com.example.whatszap.SCAN_COMPLETE") {
                     scanComplete = true
                     isMalicious = intent.getBooleanExtra("is_malicious", false)
+                    confidence = intent.getIntExtra("confidence", 0)
                     threats = intent.getStringArrayExtra("threats")?.toList() ?: emptyList()
-                    scanProgress = 100
+                    
+                    // VirusTotal data
+                    vtScanned = intent.getBooleanExtra("vt_scanned", false)
+                    vtDetections = intent.getIntExtra("vt_detections", 0)
+                    vtEngines = intent.getIntExtra("vt_engines", 0)
+                    vtLink = intent.getStringExtra("vt_link")
+                    vtThreats = intent.getStringArrayExtra("vt_threats")?.toList() ?: emptyList()
+                    sha256Hash = intent.getStringExtra("sha256_hash") ?: ""
+                    
+                    // Static analysis data
+                    packageName = intent.getStringExtra("package_name")
+                    appLabel = intent.getStringExtra("app_label")
+                    riskScore = intent.getIntExtra("risk_score", 0)
+                    dangerousPermissions = intent.getStringArrayExtra("dangerous_permissions")?.toList() ?: emptyList()
+                    suspiciousPermissions = intent.getStringArrayExtra("suspicious_permissions")?.toList() ?: emptyList()
+                    
+                    // Context
+                    senderContext = intent.getStringExtra("sender_context")
+                    fileSize = intent.getLongExtra("file_size", 0)
+                    
+                    scanProgress = 1f
                     scanStatus = if (isMalicious) {
-                        "⚠️ Potential threats detected!"
+                        "⚠️ Threats Detected!"
+                    } else if (vtDetections > 0) {
+                        "⚠️ Suspicious Activity"
                     } else {
-                        "✓ Scan complete - No threats found"
+                        "✓ Scan Complete"
                     }
                 }
             }
         }
-        context.registerReceiver(receiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(
+                receiver, 
+                IntentFilter("com.example.whatszap.SCAN_COMPLETE"),
+                Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            context.registerReceiver(receiver, IntentFilter("com.example.whatszap.SCAN_COMPLETE"))
+        }
         
         // Simulate progress update while scanning
         val progressJob = coroutineScope.launch {
-            while (!scanComplete && scanProgress < 90) {
-                delay(500)
-                scanProgress += 10
+            val stages = listOf(
+                "Calculating file hash..." to 0.15f,
+                "Performing static analysis..." to 0.30f,
+                "Checking VirusTotal database..." to 0.50f,
+                "Analyzing permissions..." to 0.70f,
+                "Running behavioral analysis..." to 0.85f,
+                "Finalizing scan..." to 0.95f
+            )
+            
+            for ((status, progress) in stages) {
+                if (scanComplete) break
+                scanStatus = status
+                scanProgress = progress
+                delay(1500)
             }
         }
         
@@ -171,98 +266,346 @@ fun AlertScreen(apkPath: String) {
         }
     }
     
+    val backgroundColor = when {
+        scanComplete && isMalicious -> Color(0xFFB71C1C) // Dark red
+        scanComplete && vtDetections > 0 -> Color(0xFFE65100) // Dark orange
+        scanComplete -> Color(0xFF1B5E20) // Dark green
+        else -> Color(0xFF1A237E) // Dark blue
+    }
+    
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.8f))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Black.copy(alpha = 0.95f),
+                        backgroundColor.copy(alpha = 0.9f)
+                    )
+                )
+            )
             .padding(16.dp),
         contentAlignment = Alignment.Center
     ) {
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(8.dp),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
             ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
+            shape = RoundedCornerShape(24.dp)
         ) {
             Column(
                 modifier = Modifier
                     .padding(24.dp)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                Text(
-                    text = "⚠️ SECURITY ALERT",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-                
-                Text(
-                    text = "APK File Detected",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-                
-                Text(
-                    text = apkPath.split("/").lastOrNull() ?: "Unknown file",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                LinearProgressIndicator(
-                    progress = { scanProgress / 100f },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.error
-                )
-                
-                Text(
-                    text = scanStatus,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onErrorContainer
-                )
-                
-                if (scanComplete && threats.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Scan Results:",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    threats.forEach { threat ->
-                        Text(
-                            text = "• $threat",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                } else {
-                    Text(
-                        text = "Please wait while we analyze this file for potential threats...",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f),
-                        modifier = Modifier.padding(top = 8.dp)
+                // Animated Icon
+                Box(
+                    modifier = Modifier
+                        .size(80.dp)
+                        .scale(if (!scanComplete) pulseScale else 1f)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                scanComplete && isMalicious -> Color(0xFFFFCDD2)
+                                scanComplete && vtDetections > 0 -> Color(0xFFFFE0B2)
+                                scanComplete -> Color(0xFFC8E6C9)
+                                else -> Color(0xFFBBDEFB)
+                            }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = when {
+                            scanComplete && (isMalicious || vtDetections > 0) -> Icons.Default.Warning
+                            scanComplete -> Icons.Default.CheckCircle
+                            else -> Icons.Default.Info
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = when {
+                            scanComplete && isMalicious -> Color(0xFFB71C1C)
+                            scanComplete && vtDetections > 0 -> Color(0xFFE65100)
+                            scanComplete -> Color(0xFF1B5E20)
+                            else -> Color(0xFF1565C0)
+                        }
                     )
                 }
                 
+                // Title
                 Text(
-                    text = "This window cannot be closed until analysis is complete.",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(top = 4.dp)
+                    text = when {
+                        scanComplete && isMalicious -> "🚨 MALWARE DETECTED"
+                        scanComplete && vtDetections > 0 -> "⚠️ SUSPICIOUS FILE"
+                        scanComplete -> "✅ FILE APPEARS SAFE"
+                        else -> "🔍 SECURITY SCAN"
+                    },
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = when {
+                        scanComplete && isMalicious -> Color(0xFFB71C1C)
+                        scanComplete && vtDetections > 0 -> Color(0xFFE65100)
+                        scanComplete -> Color(0xFF1B5E20)
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                    textAlign = TextAlign.Center
                 )
+                
+                // File name
+                Text(
+                    text = apkPath.split("/").lastOrNull() ?: "Unknown file",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center
+                )
+                
+                // Sender context
+                senderContext?.let {
+                    Text(
+                        text = it,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                // Progress indicator
+                if (!scanComplete) {
+                    LinearProgressIndicator(
+                        progress = { scanProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(RoundedCornerShape(4.dp)),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    
+                    Text(
+                        text = scanStatus,
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                
+                // Scan complete results
+                AnimatedVisibility(visible = scanComplete) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Divider()
+                        
+                        // VirusTotal Section
+                        if (vtScanned) {
+                            ResultSection(
+                                title = "VirusTotal Analysis",
+                                content = {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "Detection Ratio",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "$vtDetections / $vtEngines engines",
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (vtDetections > 0) Color(0xFFB71C1C) else Color(0xFF1B5E20)
+                                            )
+                                        }
+                                        
+                                        vtLink?.let { link ->
+                                            TextButton(onClick = {
+                                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
+                                                context.startActivity(intent)
+                                            }) {
+                                                Text("View Report →")
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (vtThreats.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        vtThreats.take(3).forEach { threat ->
+                                            Text(
+                                                text = "• $threat",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFFB71C1C)
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        } else {
+                            ResultSection(
+                                title = "VirusTotal Analysis",
+                                content = {
+                                    Text(
+                                        text = "API key not configured",
+                                        fontSize = 14.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            )
+                        }
+                        
+                        // Static Analysis Section
+                        ResultSection(
+                            title = "Static Analysis",
+                            content = {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "Risk Score",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "$riskScore / 100",
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = when {
+                                                riskScore >= 70 -> Color(0xFFB71C1C)
+                                                riskScore >= 40 -> Color(0xFFE65100)
+                                                else -> Color(0xFF1B5E20)
+                                            }
+                                        )
+                                    }
+                                    
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = "Package",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = packageName?.take(25) ?: "Unknown",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                                
+                                if (suspiciousPermissions.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "⚠️ High-Risk Permissions (${suspiciousPermissions.size}):",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFE65100)
+                                    )
+                                    suspiciousPermissions.take(3).forEach { perm ->
+                                        val shortPerm = perm.replace("android.permission.", "")
+                                        Text(
+                                            text = "• $shortPerm",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFFE65100)
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                        
+                        // SHA-256 Hash (collapsed)
+                        if (sha256Hash.isNotEmpty()) {
+                            ResultSection(
+                                title = "File Hash (SHA-256)",
+                                content = {
+                                    Text(
+                                        text = sha256Hash.take(32) + "...",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                                    )
+                                }
+                            )
+                        }
+                        
+                        Spacer(modifier = Modifier.height(8.dp))
+                        
+                        // Action button
+                        Button(
+                            onClick = onDismiss,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = when {
+                                    isMalicious -> Color(0xFFB71C1C)
+                                    vtDetections > 0 -> Color(0xFFE65100)
+                                    else -> Color(0xFF1B5E20)
+                                }
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = when {
+                                    isMalicious -> "⚠️ Understood - Delete Recommended"
+                                    vtDetections > 0 -> "Proceed with Caution"
+                                    else -> "Continue"
+                                },
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                
+                // Waiting message
+                if (!scanComplete) {
+                    Text(
+                        text = "Please wait while we analyze this file for potential threats.\nThis window cannot be closed.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
             }
         }
     }
 }
 
+@Composable
+fun ResultSection(
+    title: String,
+    content: @Composable () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            Text(
+                text = title,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            content()
+        }
+    }
+}

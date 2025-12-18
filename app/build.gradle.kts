@@ -31,6 +31,9 @@ android {
                 arguments += listOf("-DANDROID_STL=c++_shared")
             }
         }
+
+        // VirusTotal API Key
+        buildConfigField("String", "VIRUSTOTAL_API_KEY", "\"dd0bb75b40a994607a4946bd3360e8d43842f3caccfe90dd603fd7d6a59053da\"")
     }
 
     buildTypes {
@@ -51,6 +54,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // Configure external native build
@@ -74,6 +78,18 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    
+    // Networking for VirusTotal API
+    implementation(libs.retrofit)
+    implementation(libs.retrofit.gson)
+    implementation(libs.okhttp)
+    implementation(libs.okhttp.logging)
+    implementation(libs.gson)
+    
+    // Coroutines for async operations
+    implementation(libs.coroutines.core)
+    implementation(libs.coroutines.android)
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

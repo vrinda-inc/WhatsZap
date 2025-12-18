@@ -30,14 +30,21 @@ bool FileMonitor::startMonitoring(const std::string& directory, JNIEnv* env, job
         return false;
     }
     
+    // Get JavaVM pointer BEFORE starting the thread (JNIEnv is thread-local!)
+    JavaVM* jvm;
+    if (env->GetJavaVM(&jvm) != JNI_OK) {
+        LOGE("Failed to get JavaVM");
+        return false;
+    }
+    
     // Create global reference to callback
     jobject globalCallback = env->NewGlobalRef(callback);
     
     shouldStop_ = false;
     monitoring_ = true;
     
-    // Start monitoring thread
-    monitorThread_ = std::thread(&FileMonitor::monitorThread, this, directory, env, globalCallback);
+    // Start monitoring thread - pass JavaVM* instead of JNIEnv*
+    monitorThread_ = std::thread(&FileMonitor::monitorThread, this, directory, jvm, globalCallback);
     
     LOGI("Started monitoring directory: %s", directory.c_str());
     return true;
@@ -58,12 +65,22 @@ void FileMonitor::stopMonitoring() {
     LOGI("Stopped monitoring");
 }
 
-void FileMonitor::monitorThread(const std::string& directory, JNIEnv* env, jobject callback) {
-    // Attach thread to JVM
-    JavaVM* jvm;
-    env->GetJavaVM(&jvm);
+void FileMonitor::monitorThread(const std::string& directory, JavaVM* jvm, jobject callback) {
+    // Attach this thread to the JVM
     JNIEnv* threadEnv;
-    jvm->AttachCurrentThread(&threadEnv, nullptr);
+    JavaVMAttachArgs attachArgs;
+    attachArgs.version = JNI_VERSION_1_6;
+    attachArgs.name = "FileMonitorThread";
+    attachArgs.group = nullptr;
+    
+    jint attachResult = jvm->AttachCurrentThread(&threadEnv, &attachArgs);
+    if (attachResult != JNI_OK) {
+        LOGE("Failed to attach thread to JVM: %d", attachResult);
+        monitoring_ = false;
+        return;
+    }
+    
+    LOGI("Monitor thread attached to JVM");
     
     // Create inotify instance
     int inotifyFd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
@@ -87,7 +104,7 @@ void FileMonitor::monitorThread(const std::string& directory, JNIEnv* env, jobje
     
     LOGI("Added watch for: %s (wd=%d)", directory.c_str(), wd);
     
-    char buffer[1024 * 1024]; // 1MB buffer
+    char buffer[4096]; // Smaller buffer to avoid stack issues
     
     while (!shouldStop_ && monitoring_) {
         fd_set readfds;
@@ -145,14 +162,27 @@ void FileMonitor::monitorThread(const std::string& directory, JNIEnv* env, jobje
                             
                             // Call Java callback
                             jclass callbackClass = threadEnv->GetObjectClass(callback);
-                            jmethodID methodId = threadEnv->GetMethodID(callbackClass, "onApkDetected", "(Ljava/lang/String;)V");
-                            
-                            if (methodId) {
-                                jstring jPath = threadEnv->NewStringUTF(fullPath.c_str());
-                                threadEnv->CallVoidMethod(callback, methodId, jPath);
-                                threadEnv->DeleteLocalRef(jPath);
+                            if (callbackClass) {
+                                jmethodID methodId = threadEnv->GetMethodID(callbackClass, "onApkDetected", "(Ljava/lang/String;)V");
+                                
+                                if (methodId) {
+                                    jstring jPath = threadEnv->NewStringUTF(fullPath.c_str());
+                                    threadEnv->CallVoidMethod(callback, methodId, jPath);
+                                    threadEnv->DeleteLocalRef(jPath);
+                                } else {
+                                    LOGE("Failed to find onApkDetected method");
+                                }
+                                threadEnv->DeleteLocalRef(callbackClass);
+                            } else {
+                                LOGE("Failed to get callback class");
                             }
-                            threadEnv->DeleteLocalRef(callbackClass);
+                            
+                            // Check for exceptions
+                            if (threadEnv->ExceptionCheck()) {
+                                LOGE("Exception in callback");
+                                threadEnv->ExceptionDescribe();
+                                threadEnv->ExceptionClear();
+                            }
                         }
                     }
                 }
@@ -184,4 +214,3 @@ bool FileMonitor::isApkFile(const std::string& filename) {
     
     return lower.substr(lower.length() - 4) == ".apk";
 }
-

@@ -5,7 +5,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
+import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,7 +27,7 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val allGranted = permissions.all { it.value }
         if (allGranted) {
-            startMonitoringService()
+            checkAllFilesAccess()
         }
     }
     
@@ -35,6 +37,17 @@ class MainActivity : ComponentActivity() {
         // Check if overlay permission was granted
         if (Settings.canDrawOverlays(this)) {
             startMonitoringService()
+        }
+    }
+    
+    private val requestAllFilesAccessLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // Check if all files access was granted
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Environment.isExternalStorageManager()) {
+                checkOverlayPermission()
+            }
         }
     }
 
@@ -62,7 +75,7 @@ class MainActivity : ComponentActivity() {
                 != PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.READ_MEDIA_IMAGES)
             }
-        } else {
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) 
                 != PackageManager.PERMISSION_GRANTED) {
                 permissionsToRequest.add(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -80,16 +93,40 @@ class MainActivity : ComponentActivity() {
         if (permissionsToRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         } else {
-            // Check overlay permission
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse("package:$packageName")
-                )
-                requestOverlayPermissionLauncher.launch(intent)
-            } else {
-                startMonitoringService()
+            checkAllFilesAccess()
+        }
+    }
+    
+    private fun checkAllFilesAccess() {
+        // For Android 11+, we need MANAGE_EXTERNAL_STORAGE to access WhatsApp files
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                // Request all files access permission
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent.data = Uri.parse("package:$packageName")
+                    requestAllFilesAccessLauncher.launch(intent)
+                } catch (e: Exception) {
+                    // Fallback for devices that don't support the specific intent
+                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    requestAllFilesAccessLauncher.launch(intent)
+                }
+                return
             }
+        }
+        checkOverlayPermission()
+    }
+    
+    private fun checkOverlayPermission() {
+        // Check overlay permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            requestOverlayPermissionLauncher.launch(intent)
+        } else {
+            startMonitoringService()
         }
     }
     
@@ -122,7 +159,7 @@ fun MainScreen(modifier: Modifier = Modifier, onStartMonitoring: () -> Unit) {
         Spacer(modifier = Modifier.height(16.dp))
         
         Text(
-            text = "Monitors WhatsApp download folder for APK files and scans them for malware using native C++ code",
+            text = "Monitors WhatsApp for APK files and scans them using VirusTotal + static analysis",
             style = MaterialTheme.typography.bodyMedium
         )
         
