@@ -7,9 +7,13 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.whatszap.data.*
 import com.example.whatszap.network.VirusTotalRepository
 import com.example.whatszap.utils.ApkAnalyzer
+import com.example.whatszap.utils.ApkQuarantine
+import com.example.whatszap.utils.BehaviorAnalyzer
 import com.example.whatszap.utils.HashUtils
+import com.example.whatszap.utils.ScreenshotCapture
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -18,6 +22,9 @@ class FileMonitorService : Service(), ApkDetectionCallback {
     private var nativeScannerHandle: Long = 0
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var virusTotalRepository: VirusTotalRepository
+    private lateinit var apkQuarantine: ApkQuarantine
+    private lateinit var behaviorAnalyzer: BehaviorAnalyzer
+    private lateinit var screenshotCapture: ScreenshotCapture
     
     companion object {
         private const val TAG = "FileMonitorService"
@@ -48,6 +55,11 @@ class FileMonitorService : Service(), ApkDetectionCallback {
         
         // Initialize VirusTotal repository FIRST (used by createNotification)
         virusTotalRepository = VirusTotalRepository.getInstance()
+        
+        // Initialize behavioral analysis components
+        apkQuarantine = ApkQuarantine.getInstance(this)
+        behaviorAnalyzer = BehaviorAnalyzer.getInstance(this)
+        screenshotCapture = ScreenshotCapture.getInstance(this)
         
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
@@ -128,34 +140,57 @@ class FileMonitorService : Service(), ApkDetectionCallback {
     override fun onApkDetected(apkPath: String) {
         Log.i(TAG, "APK detected via native callback: $apkPath")
         
-        // Show alert activity immediately
+        // STEP 1: Quarantine the APK immediately to prevent installation
+        val quarantinePath = apkQuarantine.quarantineApk(apkPath)
+        if (quarantinePath != null) {
+            Log.i(TAG, "APK quarantined: $quarantinePath")
+        } else {
+            Log.w(TAG, "Failed to quarantine APK, continuing with analysis")
+        }
+        
+        // STEP 2: Capture screenshot (if permission granted)
+        // Note: Screenshot capture requires MediaProjection permission which must be
+        // granted via user interaction. For now, we'll skip automatic capture.
+        // This can be enabled later when permission flow is implemented.
+        
+        // STEP 3: Show alert activity immediately
         val intent = Intent(this, AlertActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("apk_path", apkPath)
+            putExtra("quarantine_path", quarantinePath)
         }
         startActivity(intent)
         
-        // Start comprehensive scanning in background
+        // STEP 4: Start comprehensive scanning in background
         serviceScope.launch {
-            performComprehensiveScan(apkPath)
+            performComprehensiveScan(apkPath, quarantinePath)
         }
     }
     
-    private suspend fun performComprehensiveScan(apkPath: String) {
+    private suspend fun performComprehensiveScan(apkPath: String, quarantinePath: String?) {
         val startTime = System.currentTimeMillis()
         
         Log.i(TAG, "Starting comprehensive scan for: $apkPath")
         
-        // Step 1: Calculate SHA-256 hash
+        // Step 1: Extract message context
+        val messageContext = behaviorAnalyzer.extractMessageContext(apkPath)
+        Log.i(TAG, "Message context: sender=${messageContext.senderInfo}, type=${messageContext.senderType}")
+        
+        // Step 2: Perform behavioral analysis
+        val behaviorAnalysis = behaviorAnalyzer.analyzeApk(apkPath, messageContext)
+        Log.i(TAG, "Behavioral analysis complete. Risk score: ${behaviorAnalysis.riskScore}")
+        Log.i(TAG, "Patterns detected: ${behaviorAnalysis.patternsDetected.size}")
+        
+        // Step 3: Calculate SHA-256 hash
         val sha256 = HashUtils.calculateSha256(apkPath)
         Log.i(TAG, "SHA-256: $sha256")
         
-        // Step 2: Perform static analysis
+        // Step 4: Perform static analysis
         val staticAnalysis = ApkAnalyzer.analyzeApk(this@FileMonitorService, apkPath)
         Log.i(TAG, "Static analysis complete. Risk score: ${staticAnalysis.riskScore}")
         
-        // Step 3: Get sender context
-        val senderContext = ApkAnalyzer.getSenderContext(apkPath)
+        // Step 5: Get sender context (legacy, now using messageContext)
+        val senderContext = messageContext.senderInfo ?: ApkAnalyzer.getSenderContext(apkPath)
         
         // Step 4: Perform native scan (in parallel)
         val nativeScanDeferred = serviceScope.async {
@@ -177,9 +212,10 @@ class FileMonitorService : Service(), ApkDetectionCallback {
         
         val scanDuration = System.currentTimeMillis() - startTime
         
-        // Combine results
+        // Combine results including behavioral analysis
         val isMalicious = vtResult.isMalicious || 
                          (staticAnalysis.riskScore >= 50) ||
+                         (behaviorAnalysis.riskScore >= 60) ||
                          (nativeResult?.isMalicious == true)
         
         val combinedThreats = mutableListOf<String>()
@@ -190,19 +226,23 @@ class FileMonitorService : Service(), ApkDetectionCallback {
         // Add static analysis threats
         combinedThreats.addAll(staticAnalysis.getSummaryThreats())
         
+        // Add behavioral analysis threats
+        combinedThreats.addAll(behaviorAnalysis.riskFactors)
+        
         // Add native scan threats
         nativeResult?.threats?.let { threats ->
             combinedThreats.addAll(threats.filter { it != "No threats detected" })
         }
         
         // Calculate overall confidence
-        val confidence = calculateOverallConfidence(vtResult, staticAnalysis, nativeResult)
+        val confidence = calculateOverallConfidence(vtResult, staticAnalysis, behaviorAnalysis, nativeResult)
         
         Log.i(TAG, "Comprehensive scan complete:")
         Log.i(TAG, "  - Malicious: $isMalicious")
         Log.i(TAG, "  - Confidence: $confidence")
         Log.i(TAG, "  - VT Detections: ${vtResult.detectionRatio}")
         Log.i(TAG, "  - Static Risk Score: ${staticAnalysis.riskScore}")
+        Log.i(TAG, "  - Behavioral Risk Score: ${behaviorAnalysis.riskScore}")
         Log.i(TAG, "  - Duration: ${scanDuration}ms")
         
         // Send broadcast with comprehensive results
@@ -234,6 +274,17 @@ class FileMonitorService : Service(), ApkDetectionCallback {
             putExtra("sender_context", senderContext)
             putExtra("file_size", staticAnalysis.fileSizeBytes)
             putExtra("scan_duration", scanDuration)
+            
+            // Behavioral analysis data
+            putExtra("behavior_risk_score", behaviorAnalysis.riskScore)
+            putExtra("behavior_risk_level", behaviorAnalysis.getRiskLevel())
+            putExtra("behavior_patterns", behaviorAnalysis.patternsDetected.map { it.description }.toTypedArray())
+            putExtra("is_unknown_sender", messageContext.isFromUnknownSender())
+            putExtra("sender_type", messageContext.senderType.name)
+            
+            // Quarantine data
+            putExtra("is_quarantined", quarantinePath != null)
+            putExtra("quarantine_path", quarantinePath)
         }
         sendBroadcast(scanIntent)
         Log.i(TAG, "Broadcast sent to AlertActivity")
@@ -242,6 +293,7 @@ class FileMonitorService : Service(), ApkDetectionCallback {
     private fun calculateOverallConfidence(
         vtResult: com.example.whatszap.network.VirusTotalScanResult,
         staticAnalysis: com.example.whatszap.utils.ApkAnalysisResult,
+        behaviorAnalysis: BehaviorAnalysisResult,
         nativeResult: ScanResult?
     ): Int {
         var confidence = 0
@@ -257,12 +309,15 @@ class FileMonitorService : Service(), ApkDetectionCallback {
             confidence += vtConfidence
         }
         
-        // Static analysis confidence (max 30)
-        confidence += (staticAnalysis.riskScore * 0.3).toInt()
+        // Static analysis confidence (max 25)
+        confidence += (staticAnalysis.riskScore * 0.25).toInt()
         
-        // Native scan confidence (max 20)
+        // Behavioral analysis confidence (max 15)
+        confidence += (behaviorAnalysis.riskScore * 0.15).toInt()
+        
+        // Native scan confidence (max 10)
         nativeResult?.let {
-            confidence += (it.confidence * 0.2).toInt()
+            confidence += (it.confidence * 0.1).toInt()
         }
         
         return minOf(confidence, 100)

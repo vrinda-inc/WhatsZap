@@ -171,6 +171,17 @@ fun AlertScreen(apkPath: String, onDismiss: () -> Unit) {
     var senderContext by remember { mutableStateOf<String?>(null) }
     var fileSize by remember { mutableStateOf(0L) }
     
+    // Behavioral analysis state
+    var behaviorRiskScore by remember { mutableStateOf(0) }
+    var behaviorRiskLevel by remember { mutableStateOf<String?>(null) }
+    var behaviorPatterns by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isUnknownSender by remember { mutableStateOf(false) }
+    var senderType by remember { mutableStateOf<String?>(null) }
+    
+    // Quarantine state
+    var isQuarantined by remember { mutableStateOf(false) }
+    var quarantinePath by remember { mutableStateOf<String?>(null) }
+    
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     
@@ -214,6 +225,17 @@ fun AlertScreen(apkPath: String, onDismiss: () -> Unit) {
                     // Context
                     senderContext = intent.getStringExtra("sender_context")
                     fileSize = intent.getLongExtra("file_size", 0)
+                    
+                    // Behavioral analysis data
+                    behaviorRiskScore = intent.getIntExtra("behavior_risk_score", 0)
+                    behaviorRiskLevel = intent.getStringExtra("behavior_risk_level")
+                    behaviorPatterns = intent.getStringArrayExtra("behavior_patterns")?.toList() ?: emptyList()
+                    isUnknownSender = intent.getBooleanExtra("is_unknown_sender", false)
+                    senderType = intent.getStringExtra("sender_type")
+                    
+                    // Quarantine data
+                    isQuarantined = intent.getBooleanExtra("is_quarantined", false)
+                    quarantinePath = intent.getStringExtra("quarantine_path")
                     
                     scanProgress = 1f
                     scanStatus = if (isMalicious) {
@@ -522,6 +544,100 @@ fun AlertScreen(apkPath: String, onDismiss: () -> Unit) {
                                 }
                             }
                         )
+                        
+                        // Behavioral Analysis Section
+                        if (behaviorRiskScore > 0) {
+                            ResultSection(
+                                title = "Behavioral Analysis",
+                                content = {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "Behavior Risk",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = "$behaviorRiskScore / 100",
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = when {
+                                                    behaviorRiskScore >= 60 -> Color(0xFFB71C1C)
+                                                    behaviorRiskScore >= 30 -> Color(0xFFE65100)
+                                                    else -> Color(0xFF1B5E20)
+                                                }
+                                            )
+                                        }
+                                        
+                                        Column(horizontalAlignment = Alignment.End) {
+                                            Text(
+                                                text = "Risk Level",
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = behaviorRiskLevel ?: "Unknown",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                    
+                                    // Display sender info
+                                    if (isUnknownSender) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "⚠️ From Unknown Sender ($senderType)",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFFE65100)
+                                        )
+                                    }
+                                    
+                                    // Display behavioral patterns
+                                    if (behaviorPatterns.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = "Detected Patterns:",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        behaviorPatterns.take(3).forEach { pattern ->
+                                            Text(
+                                                text = "• $pattern",
+                                                fontSize = 11.sp,
+                                                color = Color(0xFFE65100)
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        
+                        // Quarantine Status Section
+                        if (isQuarantined) {
+                            ResultSection(
+                                title = "🔒 Quarantine Status",
+                                content = {
+                                    Text(
+                                        text = "This APK has been quarantined to prevent installation during analysis.",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Installation is blocked until you take action.",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFE65100),
+                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                                    )
+                                }
+                            )
+                        }
                         
                         // SHA-256 Hash (collapsed)
                         if (sha256Hash.isNotEmpty()) {

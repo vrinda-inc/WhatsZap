@@ -90,6 +90,9 @@ dependencies {
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
     
+    // Tesseract OCR for message text extraction
+    implementation("com.rmtheis:tess-two:9.1.0")
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
