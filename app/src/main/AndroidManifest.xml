@@ -56,7 +56,7 @@
             android:name=".FileMonitorService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync|mediaProjection" />
+            android:foregroundServiceType="dataSync" />
         
         <receiver
             android:name=".InstallationMonitor"
